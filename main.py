@@ -28,8 +28,8 @@ app.add_middleware(
 )
 
 # Constantes e Configuração do Google
-GOOGLE_CLIENT_ID = "762254097331-d10m55qm8aj9pcb0gb3l93l17rorcki2.apps.googleusercontent.com"
-SHEET_ID = "1cB0lfgN7LGCTB9aXGIsud-HPJ-hBevB1W1gtPeLJG_s"
+GOOGLE_CLIENT_ID = "762254097331-d10m55qm8aj9pcb0gb3l93l17rorcki2.apps.googleusercontent.com" # MESMO DO FRONTEND
+SHEET_ID = "1cB0lfgN7LGCTB9aXGIsud-HPJ-hBevB1W1gtPeLJG_s" # Extraia da URL do Google Sheets
 
 # Conectar ao Google Sheets
 # Requer um arquivo 'credentials.json' gerado no Google Cloud Console (Service Account)
@@ -119,9 +119,9 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
         man = cad.mandiocultura or {}
         hist = cad.historico or {}
         
-        hist_2023 = f"Prod: {hist.get('ano2023', {}).get('prod', '')} Kg | R$ {hist.get('ano2023', {}).get('val', '')}"
         hist_2024 = f"Prod: {hist.get('ano2024', {}).get('prod', '')} Kg | R$ {hist.get('ano2024', {}).get('val', '')}"
         hist_2025 = f"Prod: {hist.get('ano2025', {}).get('prod', '')} Kg | R$ {hist.get('ano2025', {}).get('val', '')}"
+        hist_2026 = f"Prod: {hist.get('ano2026', {}).get('prod', '')} Kg | R$ {hist.get('ano2026', {}).get('val', '')}"
 
         # MAPEAR TODAS AS 46 COLUNAS DAS 7 ETAPAS
         linha = [
@@ -175,16 +175,21 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
             cad.demandas.get("producao_precisa", ""),            # 42. O que precisa p/ produzir mais
             cad.demandas.get("qualidade_precisa", ""),           # 43. Como melhorar a qualidade
             # --- Etapa 7: Histórico ---
-            hist_2023,                                           # 44. Histórico 2023
-            hist_2024,                                           # 45. Histórico 2024
-            hist_2025                                            # 46. Histórico 2025 (Previsto)
+            hist_2024,                                           # 44. Histórico 2024
+            hist_2025,                                           # 45. Histórico 2025
+            hist_2026                                            # 46. Histórico 2026 (Previsto)
         ]
         linhas_para_inserir.append(linha)
 
     if linhas_para_inserir:
         try:
-            # Insere em lote (otimiza chamadas da API)
-            aba_cadastros.append_rows(linhas_para_inserir, value_input_option='USER_ENTERED')
+            # Insere em lote e FORÇA o início exato na Coluna A e criação de nova linha
+            aba_cadastros.append_rows(
+                linhas_para_inserir, 
+                value_input_option='USER_ENTERED',
+                insert_data_option='INSERT_ROWS',
+                table_range='A1'
+            )
             return {"message": f"{len(linhas_para_inserir)} registros sincronizados com sucesso."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
