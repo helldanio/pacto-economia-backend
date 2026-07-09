@@ -218,7 +218,27 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
     else:
         return {"message": "Nenhum registo válido processado."}
 
-
+@app.get("/api/dashboard")
+async def get_dashboard_data():
+    """
+    Lê todos os dados da planilha e envia para o Dashboard Analítico
+    """
+    if not aba_cadastros:
+        raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
+    
+    try:
+        # Puxa todos os valores da planilha de uma só vez (muito rápido)
+        rows = aba_cadastros.get_all_values()
+        
+        # Se só tiver o cabeçalho ou estiver vazia
+        if not rows or len(rows) <= 1:
+            return {"data": []}
+            
+        # Retorna todos os dados, ignorando a primeira linha (cabeçalho)
+        return {"data": rows[1:]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao ler planilha: {str(e)}")
+        
 @app.delete("/api/cadastros/{record_id}")
 async def delete_cadastro(record_id: str, user_email: str = Depends(verify_google_token)):
     """
