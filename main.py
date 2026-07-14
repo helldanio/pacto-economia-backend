@@ -55,8 +55,11 @@ class RecordModel(BaseModel):
     foco_produtivo: str
     apicultura: Optional[Dict[str, Any]] = None
     mandiocultura: Optional[Dict[str, Any]] = None
+    cajucultura: Optional[Dict[str, Any]] = None
+    outras_culturas: Optional[Dict[str, Any]] = None
     demandas: Dict[str, Any]
     historico: Dict[str, Any]
+    observacoes: Optional[str] = ""
 
 # --- DEPENDÊNCIA DE AUTENTICAÇÃO ---
 def verify_google_token(authorization: str = Header(None)):
@@ -149,6 +152,8 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
         # 3. Tratamento de campos opcionais para evitar erros se estiverem vazios
         api = cad.apicultura or {}
         man = cad.mandiocultura or {}
+        caju = cad.cajucultura or {}
+        outras = cad.outras_culturas or {}
         hist = cad.historico or {}
         
         hist_2024 = f"Prod: {hist.get('ano2024', {}).get('prod', '')} Kg | R$ {hist.get('ano2024', {}).get('val', '')}"
@@ -200,9 +205,19 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
             cad.demandas.get("ass_tec", ""),                     # 41. Recebe Assistência Técnica
             cad.demandas.get("producao_precisa", ""),            # 42. O que precisa para produzir mais
             cad.demandas.get("qualidade_precisa", ""),           # 43. Como melhorar a qualidade
+            # --- Etapa 7: Histórico e Observações ---
             hist_2024,                                           # 44. Histórico 2024
             hist_2025,                                           # 45. Histórico 2025
-            hist_2026                                            # 46. Histórico 2026 (Previsto)
+            hist_2026,                                           # 46. Histórico 2026 (Previsto)
+            cad.observacoes,                                     # 47. Observações Finais
+            # --- Novos Focos Produtivos ---
+            caju.get("area", ""),                                # 48. [Caju] Área (ha)
+            caju.get("prod_ano", ""),                            # 49. [Caju] Produção Anual
+            caju.get("destino", ""),                             # 50. [Caju] Destino da Produção
+            outras.get("descricao", ""),                         # 51. [Outras] Descrição da Cultura
+            outras.get("area", ""),                              # 52. [Outras] Área
+            outras.get("prod_ano", ""),                          # 53. [Outras] Produção Anual
+            outras.get("destino", "")                            # 54. [Outras] Destino
         ]
 
         # LÓGICA ANTI-DUPLICAÇÃO (UPSERT)
@@ -212,7 +227,7 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
             
             aba_cadastros.update(
                 values=[linha],
-                range_name=f"A{linha_idx}:AT{linha_idx}", # AT é a 46ª coluna
+                range_name=f"A{linha_idx}:BB{linha_idx}", # Agora vai até a coluna BB (54ª Coluna)
                 value_input_option='USER_ENTERED'
             )
             registros_atualizados += 1
