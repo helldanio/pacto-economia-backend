@@ -84,6 +84,28 @@ def verify_google_token(authorization: str = Header(None)):
 
 # --- ROTAS ---
 
+@app.get("/api/dashboard")
+async def get_dashboard_data():
+    """
+    Lê todos os dados da planilha e envia para o Dashboard Analítico (KPIs).
+    """
+    if not aba_cadastros:
+        raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
+    
+    try:
+        # Puxa todos os valores da planilha de uma só vez (muito rápido)
+        rows = aba_cadastros.get_all_values()
+        
+        # Se só tiver o cabeçalho ou estiver vazia
+        if not rows or len(rows) <= 1:
+            return {"data": []}
+            
+        # Retorna todos os dados, ignorando a primeira linha (cabeçalho)
+        return {"data": rows[1:]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao ler planilha: {str(e)}")
+
+
 @app.post("/api/cadastros/sync")
 async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends(verify_google_token)):
     """
@@ -103,7 +125,8 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
 
     for cad in cadastros:
         # Segurança: Garante que o agente só sincroniza registos associados a ele
-        if cad.agente_email != user_email:
+        # Adicionado .strip().lower() para evitar erros de espaços ou letras maiúsculas entre sessões
+        if cad.agente_email.strip().lower() != user_email.strip().lower():
             continue
             
         # TRATAMENTO DE DADOS COMPLEXOS:
@@ -196,49 +219,33 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
         else:
             # 2. Se o ID não existir, guardamos para inserir no final
             linhas_para_inserir.append(linha)
-            # Adiciona o ID à lista em memória para evitar duas inserções repetidas na mesma sincronização
-            coluna_ids.append(cad.id) 
 
-    # INSERE OS REGISTOS NOVOS DE UMA VEZ SÓ
+    # INSERE OS REGISTOS NOVOS DE UMA VEZ SÓ (CORREÇÃO DEFINITIVA DE ALINHAMENTO)
     if linhas_para_inserir:
         try:
-            # Insere em lote e FORÇA o início exato na Coluna A e criação de uma nova linha
-            aba_cadastros.append_rows(
-                linhas_para_inserir, 
-                value_input_option='USER_ENTERED',
-                insert_data_option='INSERT_ROWS',
-                table_range='A1'
+            # Força o intervalo exato na primeira linha vazia (baseado no tamanho da Coluna A)
+            linha_inicial = len(coluna_ids) + 1
+            linha_final = linha_inicial + len(linhas_para_inserir) - 1
+            
+            aba_cadastros.update(
+                values=linhas_para_inserir,
+                range_name=f"A{linha_inicial}:AT{linha_final}",
+                value_input_option='USER_ENTERED'
             )
+            # Atualiza os IDs na memória para a próxima iteração não duplicar
+            for cad in cadastros:
+                coluna_ids.append(cad.id)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=f"Erro ao escrever na planilha: {str(e)}")
             
     total = registros_atualizados + len(linhas_para_inserir)
     if total > 0:
         return {"message": f"{len(linhas_para_inserir)} inseridos e {registros_atualizados} atualizados com sucesso."}
     else:
-        return {"message": "Nenhum registo válido processado."}
+        # Se 0 dados foram processados (geralmente por e-mail diferente), levanta um Erro 400!
+        raise HTTPException(status_code=400, detail="Os dados não pertencem ao usuário autenticado ou a sessão é inválida.")
 
-@app.get("/api/dashboard")
-async def get_dashboard_data():
-    """
-    Lê todos os dados da planilha e envia para o Dashboard Analítico
-    """
-    if not aba_cadastros:
-        raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
-    
-    try:
-        # Puxa todos os valores da planilha de uma só vez (muito rápido)
-        rows = aba_cadastros.get_all_values()
-        
-        # Se só tiver o cabeçalho ou estiver vazia
-        if not rows or len(rows) <= 1:
-            return {"data": []}
-            
-        # Retorna todos os dados, ignorando a primeira linha (cabeçalho)
-        return {"data": rows[1:]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao ler planilha: {str(e)}")
-        
+
 @app.delete("/api/cadastros/{record_id}")
 async def delete_cadastro(record_id: str, user_email: str = Depends(verify_google_token)):
     """
