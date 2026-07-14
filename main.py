@@ -244,7 +244,7 @@ async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends
             
             aba_cadastros.update(
                 values=linhas_para_inserir,
-                range_name=f"A{linha_inicial}:AT{linha_final}",
+                range_name=f"A{linha_inicial}:BB{linha_final}",
                 value_input_option='USER_ENTERED'
             )
             # Atualiza os IDs na memória para a próxima iteração não duplicar
