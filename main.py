@@ -1,294 +1,247 @@
-"""
-Pacto pela Economia - Backend API
-Este script utiliza FastAPI para gerir a integração entre o PWA e o Google Sheets.
-
-Requisitos de Instalação:
-pip install fastapi uvicorn gspread google-auth pydantic
-"""
-
-from fastapi import FastAPI, HTTPException, Header, Depends
+import os
+import json
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 import gspread
+from google.oauth2.service_account import Credentials
 from google.oauth2 import id_token
 from google.auth.transport import requests
-import json
-import os
 
-app = FastAPI(title="Pacto pela Economia API")
+# --- CONFIGURAÇÕES GERAIS ---
+app = FastAPI(title="API Pacto pela Economia")
 
-# Configuração de CORS (Para permitir que o PWA aceda à API a partir de qualquer domínio)
+# Permite que o frontend (celular/navegador) converse com esta API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Constantes e Configuração do Google
-GOOGLE_CLIENT_ID = "762254097331-d10m55qm8aj9pcb0gb3l93l17rorcki2.apps.googleusercontent.com" 
-# ID real da folha de cálculo
-SHEET_ID = "1cB0lfgN7LGCTB9aXGIsud-HPJ-hBevB1W1gtPeLJG_s" 
+# Chave do Google Client para validar o Token
+GOOGLE_CLIENT_ID = "762254097331-d10m55qm8aj9pcb0gb3l93l17rorcki2.apps.googleusercontent.com"
 
-# Ligar ao Google Sheets
+# LISTA VIP: E-mails autorizados a gerar o Relatório PDF no Dashboard
+# Coloque os e-mails da sua equipe aqui (sempre em letras minúsculas)
+EMAILS_AUTORIZADOS_PDF = [
+    "helldanio@gmail.com",
+    "michellysamia0210@gmail.com",
+    "lucilandiasousa383@gmail.com",
+    "secretariaagriculturasaojose@gmail.com",
+    "rubensbarbosa4@gmail.com",
+    "leilanogueira3@gmail.com",
+    "Samuelpontesdonascimento@gmail.com",
+    "guedesafilho@gmail.com"
+]
+
 try:
-    gc = gspread.service_account(filename='credentials.json')
-    planilha = gc.open_by_key(SHEET_ID)
-    aba_cadastros = planilha.sheet1 # Assume que os dados vão para o primeiro separador
+    # Utiliza o arquivo de credenciais do Google Cloud
+    # IMPORTANTE: Garanta que o arquivo credentials.json está na mesma pasta
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
+    client = gspread.authorize(creds)
+    
+    # ID DA PLANILHA OFICIAL (Substitua se necessário)
+    PLANILHA_ID = "1cB0lfgN7LGCTB9aXGIsud-HPJ-hBevB1W1gtPeLJG_s"
+    
+    planilha = client.open_by_key(PLANILHA_ID)
+    aba_cadastros = planilha.sheet1
+    print("Conexão com Google Sheets estabelecida com sucesso!")
 except Exception as e:
-    print(f"Aviso: Não foi possível ligar ao Google Sheets. Verifique o credentials.json e o ID. Erro: {e}")
+    print(f"Erro Crítico ao conectar com Google Sheets: {e}")
     aba_cadastros = None
 
 
-# --- MODELOS DE DADOS (Mapeiam o JSON complexo do frontend) ---
-class RecordModel(BaseModel):
-    id: str
-    agente_email: str
-    data_cadastro: str
-    sync_status: str
-    identificacao: Dict[str, Any]
-    composicao_familiar: Dict[str, Any]
-    economia: Dict[str, Any]
-    propriedade: Dict[str, Any]
-    foco_produtivo: str
-    apicultura: Optional[Dict[str, Any]] = None
-    mandiocultura: Optional[Dict[str, Any]] = None
-    cajucultura: Optional[Dict[str, Any]] = None
-    outras_culturas: Optional[Dict[str, Any]] = None
-    demandas: Dict[str, Any]
-    historico: Dict[str, Any]
-    observacoes: Optional[str] = ""
-
-# --- DEPENDÊNCIA DE AUTENTICAÇÃO ---
-def verify_google_token(authorization: str = Header(None)):
+async def verify_google_token(authorization: str = Header(None)):
     """
-    Verifica o JWT enviado pelo frontend (Google Sign-In) ou o token manual.
+    Verifica a identidade do usuário.
+    Aceita Tokens JWT Oficiais do Google e Tokens de Bypass (Offline).
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        return "agente@teste.com" # Utilizador de teste caso o cabeçalho não exista
-        
-    token = authorization.split(" ")[1]
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token de segurança ausente")
     
-    # Bypass para aceitar o login manual feito offline
+    token = authorization.replace("Bearer ", "")
+    
+    # Bypass 1: Modo Manual (Offline)
     if token.startswith("manual_"):
-        return token.replace("manual_", "") # Retorna o e-mail digitado manualmente
-
-    # Se for o utilizador de simulação
+        return token.replace("manual_", "")
+        
+    # Bypass 2: Modo Simulado (Testes)
     if token == "mock_token":
         return "agente@teste.com"
-
+        
+    # Validação Real no Google
     try:
         idinfo = id_token.verify_oauth2_token(token, requests.Request(), GOOGLE_CLIENT_ID)
         return idinfo['email']
     except ValueError:
-        raise HTTPException(status_code=401, detail="Token inválido")
+        raise HTTPException(status_code=401, detail="Token do Google inválido ou expirado. Faça login novamente.")
 
-# --- ROTAS ---
 
 @app.get("/api/dashboard")
-async def get_dashboard_data():
+async def get_dashboard_data(user_email: str = Depends(verify_google_token)):
     """
-    Lê todos os dados da planilha e envia para o Dashboard Analítico (KPIs).
+    Puxa todos os dados da planilha para exibir no Painel Analítico.
+    Valida se o usuário tem permissão VIP para ver o botão do PDF.
     """
     if not aba_cadastros:
-        raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
+        raise HTTPException(status_code=500, detail="Google Sheets não configurado no servidor.")
     
     try:
-        # Puxa todos os valores da planilha de uma só vez (muito rápido)
+        # Puxa toda a matriz de dados da planilha de uma vez só
         rows = aba_cadastros.get_all_values()
         
-        # Se só tiver o cabeçalho ou estiver vazia
+        # Confere se o e-mail que requisitou está na nossa Lista VIP
+        tem_permissao_pdf = user_email.lower() in [e.lower() for e in EMAILS_AUTORIZADOS_PDF]
+        
+        # Se estiver vazia (só cabeçalho)
         if not rows or len(rows) <= 1:
-            return {"data": []}
+            return {"data": [], "is_admin": tem_permissao_pdf}
             
-        # Retorna todos os dados, ignorando a primeira linha (cabeçalho)
-        return {"data": rows[1:]}
+        return {"data": rows[1:], "is_admin": tem_permissao_pdf}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao ler planilha: {str(e)}")
 
 
 @app.post("/api/cadastros/sync")
-async def sync_cadastros(cadastros: List[RecordModel], user_email: str = Depends(verify_google_token)):
+async def sync_cadastros(cadastros: list, user_email: str = Depends(verify_google_token)):
     """
-    Recebe os cadastros offline do PWA e insere/atualiza na Folha de Cálculo.
+    Recebe os cadastros do aplicativo, trata e mapeia em 54 colunas (A a BB).
     """
     if not aba_cadastros:
         raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
-
+        
+    if not cadastros:
+        return {"message": "Nenhum cadastro recebido para sincronizar."}
+        
     try:
-        # Obtém todos os IDs existentes na coluna A para verificar duplicações
-        coluna_ids = aba_cadastros.col_values(1)
+        existing_data = aba_cadastros.get_all_values()
+        next_row = len(existing_data) + 1
+        
+        rows_to_insert = []
+        for c in cadastros:
+            
+            # Tratamento da Infraestrutura (Transforma booleanos em Texto separado por vírgula)
+            infra = c.get("propriedade", {}).get("infraestrutura", {})
+            infra_list = []
+            if infra.get("energia"): infra_list.append("Energia Elétrica")
+            if infra.get("agua"): infra_list.append("Água")
+            if infra.get("internet"): infra_list.append("Internet")
+            if infra.get("veiculo"): infra_list.append("Veículo Próprio")
+            infra_str = ", ".join(infra_list)
+            
+            # Tratamento da Composição Familiar (Transforma array em Texto)
+            demais = c.get("composicao_familiar", {}).get("demais", [])
+            demais_list = [f"{d.get('nome', '')} ({d.get('parentesco', '')}) - {d.get('nascimento', '')}" for d in demais]
+            demais_str = " | ".join(demais_list)
+            
+            # Tratamento dos Históricos de Produção
+            h24 = c.get('historico', {}).get('ano2024', {})
+            hist_2024 = f"{h24.get('prod', '')} Kg / R$ {h24.get('val', '')}" if h24.get('prod') or h24.get('val') else ""
+            
+            h25 = c.get('historico', {}).get('ano2025', {})
+            hist_2025 = f"{h25.get('prod', '')} Kg / R$ {h25.get('val', '')}" if h25.get('prod') or h25.get('val') else ""
+            
+            h26 = c.get('historico', {}).get('ano2026', {})
+            hist_2026 = f"{h26.get('prod', '')} Kg / R$ {h26.get('val', '')}" if h26.get('prod') or h26.get('val') else ""
+
+            # MAPEAMENTO EXATO: 54 Colunas (Alinhado com a Planilha Oficial)
+            row = [
+                str(c.get("id", "")), # A (1)
+                user_email,           # B (2)
+                c.get("data_cadastro", ""), # C (3)
+                c.get("identificacao", {}).get("nome", ""), # D (4)
+                c.get("identificacao", {}).get("cpf", ""), # E (5)
+                c.get("identificacao", {}).get("rg", ""), # F (6)
+                c.get("identificacao", {}).get("nascimento", ""), # G (7)
+                c.get("identificacao", {}).get("nacionalidade", ""), # H (8)
+                c.get("identificacao", {}).get("genero", ""), # I (9)
+                c.get("identificacao", {}).get("estado_civil", ""), # J (10)
+                c.get("identificacao", {}).get("escolaridade", ""), # K (11)
+                c.get("identificacao", {}).get("caf_dap", ""), # L (12)
+                c.get("identificacao", {}).get("associacao", ""), # M (13)
+                c.get("composicao_familiar", {}).get("conjuge", {}).get("nome", ""), # N (14)
+                c.get("composicao_familiar", {}).get("conjuge", {}).get("cpf", ""), # O (15)
+                demais_str, # P (16)
+                c.get("economia", {}).get("fontes", ""), # Q (17)
+                c.get("economia", {}).get("faixa", ""), # R (18)
+                c.get("economia", {}).get("cadunico", ""), # S (19)
+                c.get("economia", {}).get("beneficios", ""), # T (20)
+                c.get("propriedade", {}).get("nome", ""), # U (21)
+                c.get("propriedade", {}).get("endereco", ""), # V (22)
+                c.get("propriedade", {}).get("situacao", ""), # W (23)
+                c.get("propriedade", {}).get("docs", ""), # X (24)
+                infra_str, # Y (25)
+                c.get("foco_produtivo", ""), # Z (26)
+                c.get("apicultura", {}).get("area", ""), # AA (27)
+                c.get("apicultura", {}).get("colmeias_inst", ""), # AB (28)
+                c.get("apicultura", {}).get("colmeias_prod", ""), # AC (29)
+                c.get("apicultura", {}).get("prod_ano", ""), # AD (30)
+                c.get("apicultura", {}).get("estrutura", ""), # AE (31)
+                c.get("apicultura", {}).get("registro", ""), # AF (32)
+                c.get("apicultura", {}).get("destino", ""), # AG (33)
+                c.get("mandiocultura", {}).get("area_plan", ""), # AH (34)
+                c.get("mandiocultura", {}).get("area_colh", ""), # AI (35)
+                c.get("mandiocultura", {}).get("prod_ton", ""), # AJ (36)
+                c.get("mandiocultura", {}).get("casa_far", ""), # AK (37)
+                c.get("mandiocultura", {}).get("far_mes", ""), # AL (38)
+                c.get("mandiocultura", {}).get("destino", ""), # AM (39)
+                c.get("demandas", {}).get("dificuldades", ""), # AN (40)
+                c.get("demandas", {}).get("ass_tec", ""), # AO (41)
+                c.get("demandas", {}).get("producao_precisa", ""), # AP (42)
+                c.get("demandas", {}).get("qualidade_precisa", ""), # AQ (43)
+                hist_2024, # AR (44)
+                hist_2025, # AS (45)
+                hist_2026, # AT (46)
+                c.get("observacoes", ""), # AU (47)
+                c.get("cajucultura", {}).get("area", ""), # AV (48)
+                c.get("cajucultura", {}).get("prod_ano", ""), # AW (49)
+                c.get("cajucultura", {}).get("destino", ""), # AX (50)
+                c.get("outras_culturas", {}).get("descricao", ""), # AY (51)
+                c.get("outras_culturas", {}).get("area", ""), # AZ (52)
+                c.get("outras_culturas", {}).get("prod_ano", ""), # BA (53)
+                c.get("outras_culturas", {}).get("destino", ""), # BB (54)
+            ]
+            rows_to_insert.append(row)
+        
+        # Insere em lote (Batch Insert)
+        if rows_to_insert:
+            end_row = next_row + len(rows_to_insert) - 1
+            range_name = f"A{next_row}:BB{end_row}"
+            aba_cadastros.update(range_name, rows_to_insert)
+            
+        return {"status": "success", "message": f"{len(rows_to_insert)} cadastros sincronizados com sucesso."}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao aceder à folha de cálculo: {str(e)}")
-
-    linhas_para_inserir = []
-    registros_atualizados = 0
-
-    for cad in cadastros:
-        # Segurança: Garante que o agente só sincroniza registos associados a ele
-        # Adicionado .strip().lower() para evitar erros de espaços ou letras maiúsculas entre sessões
-        if cad.agente_email.strip().lower() != user_email.strip().lower():
-            continue
-            
-        # TRATAMENTO DE DADOS COMPLEXOS:
-        # 1. Achatar lista de parentes numa string legível
-        familia_str = ""
-        membros_demais = cad.composicao_familiar.get("demais", [])
-        if membros_demais:
-            lista_membros = [f"{m.get('nome','')} ({m.get('parentesco','')}) - Nasc: {m.get('nascimento','')}" for m in membros_demais]
-            familia_str = " | ".join(lista_membros)
-            
-        # 2. Achatar as caixas de verificação (checkboxes) de infraestrutura numa string
-        infra = cad.propriedade.get("infraestrutura", {})
-        infra_lista = []
-        if infra.get("energia"): infra_lista.append("Energia Elétrica")
-        if infra.get("agua"): infra_lista.append("Água")
-        if infra.get("internet"): infra_lista.append("Internet")
-        if infra.get("veiculo"): infra_lista.append("Veículo Próprio")
-        infra_str = ", ".join(infra_lista)
-
-        # 3. Tratamento de campos opcionais para evitar erros se estiverem vazios
-        api = cad.apicultura or {}
-        man = cad.mandiocultura or {}
-        caju = cad.cajucultura or {}
-        outras = cad.outras_culturas or {}
-        hist = cad.historico or {}
-        
-        hist_2024 = f"Prod: {hist.get('ano2024', {}).get('prod', '')} Kg | R$ {hist.get('ano2024', {}).get('val', '')}"
-        hist_2025 = f"Prod: {hist.get('ano2025', {}).get('prod', '')} Kg | R$ {hist.get('ano2025', {}).get('val', '')}"
-        hist_2026 = f"Prod: {hist.get('ano2026', {}).get('prod', '')} Kg | R$ {hist.get('ano2026', {}).get('val', '')}"
-
-        # MAPEAR TODAS AS 46 COLUNAS DAS 7 ETAPAS
-        linha = [
-            cad.id,                                              # 1. ID Único
-            user_email,                                          # 2. Email do Agente
-            cad.data_cadastro,                                   # 3. Data Cadastro
-            cad.identificacao.get("nome", ""),                   # 4. Nome
-            cad.identificacao.get("cpf", ""),                    # 5. CPF
-            cad.identificacao.get("rg", ""),                     # 6. RG
-            cad.identificacao.get("nascimento", ""),             # 7. Data de Nascimento
-            cad.identificacao.get("nacionalidade", ""),          # 8. Nacionalidade
-            cad.identificacao.get("genero", ""),                 # 9. Género
-            cad.identificacao.get("estado_civil", ""),           # 10. Estado Civil
-            cad.identificacao.get("escolaridade", ""),           # 11. Escolaridade
-            cad.identificacao.get("caf_dap", ""),                # 12. CAF/DAP
-            cad.identificacao.get("associacao", ""),             # 13. Associação/Cooperativa
-            cad.composicao_familiar.get("conjuge", {}).get("nome", ""), # 14. Nome Cônjuge
-            cad.composicao_familiar.get("conjuge", {}).get("cpf", ""),  # 15. CPF Cônjuge
-            familia_str,                                         # 16. Outros Componentes Familiares
-            cad.economia.get("fontes", ""),                      # 17. Fontes de Renda
-            cad.economia.get("faixa", ""),                       # 18. Faixa de Renda Mensal
-            cad.economia.get("cadunico", ""),                    # 19. CadÚnico
-            cad.economia.get("beneficios", ""),                  # 20. Benefícios do Governo
-            cad.propriedade.get("nome", ""),                     # 21. Nome da Propriedade
-            cad.propriedade.get("endereco", ""),                 # 22. Endereço/Comunidade
-            cad.propriedade.get("situacao", ""),                 # 23. Situação da Terra
-            cad.propriedade.get("docs", ""),                     # 24. Documentos da Terra
-            infra_str,                                           # 25. Infraestrutura
-            cad.foco_produtivo.upper(),                          # 26. Foco Principal
-            api.get("area", ""),                                 # 27. [MEL] Área (ha)
-            api.get("colmeias_inst", ""),                        # 28. [MEL] Colmeias Instaladas
-            api.get("colmeias_prod", ""),                        # 29. [MEL] Colmeias Produtivas
-            api.get("prod_ano", ""),                             # 30. [MEL] Produção Anual (Kg)
-            api.get("estrutura", ""),                            # 31. [MEL] Possui Casa de Mel
-            api.get("registro", ""),                             # 32. [MEL] Registo Sanitário
-            api.get("destino", ""),                              # 33. [MEL] Destino da Produção
-            man.get("area_plan", ""),                            # 34. [MANDIOCA] Área Plantada
-            man.get("area_colh", ""),                            # 35. [MANDIOCA] Área Colhida
-            man.get("prod_ton", ""),                             # 36. [MANDIOCA] Produção Anual (Ton)
-            man.get("casa_far", ""),                             # 37. [MANDIOCA] Casa de Farinha
-            man.get("far_mes", ""),                              # 38. [MANDIOCA] Farinha/Mês (Kg)
-            man.get("destino", ""),                              # 39. [MANDIOCA] Destino da Produção
-            cad.demandas.get("dificuldades", ""),                # 40. Dificuldades Principais
-            cad.demandas.get("ass_tec", ""),                     # 41. Recebe Assistência Técnica
-            cad.demandas.get("producao_precisa", ""),            # 42. O que precisa para produzir mais
-            cad.demandas.get("qualidade_precisa", ""),           # 43. Como melhorar a qualidade
-            # --- Etapa 7: Histórico e Observações ---
-            hist_2024,                                           # 44. Histórico 2024
-            hist_2025,                                           # 45. Histórico 2025
-            hist_2026,                                           # 46. Histórico 2026 (Previsto)
-            cad.observacoes,                                     # 47. Observações Finais
-            # --- Novos Focos Produtivos ---
-            caju.get("area", ""),                                # 48. [Caju] Área (ha)
-            caju.get("prod_ano", ""),                            # 49. [Caju] Produção Anual
-            caju.get("destino", ""),                             # 50. [Caju] Destino da Produção
-            outras.get("descricao", ""),                         # 51. [Outras] Descrição da Cultura
-            outras.get("area", ""),                              # 52. [Outras] Área
-            outras.get("prod_ano", ""),                          # 53. [Outras] Produção Anual
-            outras.get("destino", "")                            # 54. [Outras] Destino
-        ]
-
-        # LÓGICA ANTI-DUPLICAÇÃO (UPSERT)
-        if cad.id in coluna_ids:
-            # 1. Se o ID já existir, atualizamos a linha existente
-            linha_idx = coluna_ids.index(cad.id) + 1 # +1 porque a folha de cálculo começa na linha 1
-            
-            aba_cadastros.update(
-                values=[linha],
-                range_name=f"A{linha_idx}:BB{linha_idx}", # Agora vai até a coluna BB (54ª Coluna)
-                value_input_option='USER_ENTERED'
-            )
-            registros_atualizados += 1
-        else:
-            # 2. Se o ID não existir, guardamos para inserir no final
-            linhas_para_inserir.append(linha)
-
-    # INSERE OS REGISTOS NOVOS DE UMA VEZ SÓ (CORREÇÃO DEFINITIVA DE ALINHAMENTO)
-    if linhas_para_inserir:
-        try:
-            # Força o intervalo exato na primeira linha vazia (baseado no tamanho da Coluna A)
-            linha_inicial = len(coluna_ids) + 1
-            linha_final = linha_inicial + len(linhas_para_inserir) - 1
-            
-            aba_cadastros.update(
-                values=linhas_para_inserir,
-                range_name=f"A{linha_inicial}:BB{linha_final}",
-                value_input_option='USER_ENTERED'
-            )
-            # Atualiza os IDs na memória para a próxima iteração não duplicar
-            for cad in cadastros:
-                coluna_ids.append(cad.id)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Erro ao escrever na planilha: {str(e)}")
-            
-    total = registros_atualizados + len(linhas_para_inserir)
-    if total > 0:
-        return {"message": f"{len(linhas_para_inserir)} inseridos e {registros_atualizados} atualizados com sucesso."}
-    else:
-        # Se 0 dados foram processados (geralmente por e-mail diferente), levanta um Erro 400!
-        raise HTTPException(status_code=400, detail="Os dados não pertencem ao usuário autenticado ou a sessão é inválida.")
+        # Repassa o erro detalhado para o frontend se houver falha (ex: Colunas incompatíveis)
+        raise HTTPException(status_code=400, detail=f"Erro ao escrever na planilha: {str(e)}")
 
 
-@app.delete("/api/cadastros/{record_id}")
-async def delete_cadastro(record_id: str, user_email: str = Depends(verify_google_token)):
+@app.delete("/api/cadastros/{cadastro_id}")
+async def delete_cadastro(cadastro_id: str, user_email: str = Depends(verify_google_token)):
     """
-    Exclui a linha correspondente no Google Sheets.
+    Busca a linha na planilha através da Coluna 1 (ID Unico) e apaga a linha inteira.
     """
     if not aba_cadastros:
         raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
         
     try:
-        coluna_ids = aba_cadastros.col_values(1)
-        if record_id in coluna_ids:
-            linha_idx = coluna_ids.index(record_id) + 1 
-            
-            # Verifica se o agente é o proprietário do registo (Coluna 2)
-            agente_da_linha = aba_cadastros.cell(linha_idx, 2).value
-            if agente_da_linha == user_email:
-                aba_cadastros.delete_rows(linha_idx)
-                return {"message": "Registo excluído com sucesso."}
-            else:
-                raise HTTPException(status_code=403, detail="Não autorizado a apagar este registo.")
-        else:
-            raise HTTPException(status_code=404, detail="Registo não encontrado.")
-            
+        # Traz todos os IDs da primeira coluna para procurar onde está
+        col_ids = aba_cadastros.col_values(1)
+        
+        try:
+            # +1 porque as planilhas do Google começam no índice 1 (não 0)
+            row_index = col_ids.index(str(cadastro_id)) + 1
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Cadastro não encontrado na planilha oficial")
+        
+        # Executa a exclusão da linha
+        aba_cadastros.delete_rows(row_index)
+        return {"status": "success", "message": "Registro excluído permanentemente da planilha."}
+        
+    except HTTPException:
+        raise # Repassa o Erro 404 normalmente
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-if __name__ == "__main__":
-    import uvicorn
-    # Executa o servidor localmente na porta 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
