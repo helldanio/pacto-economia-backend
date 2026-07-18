@@ -2,4 +2,6 @@ fastapi
 uvicorn
 gspread
 google-auth
-pydantic
+google-auth-oauthlib
+google-auth-httplib2
+requests
