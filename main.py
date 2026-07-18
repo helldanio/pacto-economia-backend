@@ -1,6 +1,6 @@
 import os
 import json
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import gspread
@@ -20,8 +20,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Chave do Google Client para validar o Token
-GOOGLE_CLIENT_ID = "762254097331-d10m55qm8aj9pcb0gb3l93l17rorcki2.apps.googleusercontent.com"
+# LISTA DE CHAVES GOOGLE: A API aceita tokens tanto do App quanto do Dashboard
+GOOGLE_CLIENT_IDS = [
+    "762254097331-d10m55qm8aj9pcb0gb3l93l17rorcki2.apps.googleusercontent.com", # Chave do PWA App
+    "559545091323-3km4t2f24l647kmv84bmpkorjhjpm7j0.apps.googleusercontent.com"  # Nova Chave do Dashboard
+]
 
 # LISTA VIP: E-mails autorizados a gerar o Relatório PDF no Dashboard
 # Coloque os e-mails da sua equipe aqui (sempre em letras minúsculas)
@@ -32,7 +35,7 @@ EMAILS_AUTORIZADOS_PDF = [
     "secretariaagriculturasaojose@gmail.com",
     "rubensbarbosa4@gmail.com",
     "leilanogueira3@gmail.com",
-    "Samuelpontesdonascimento@gmail.com",
+    "samuelpontesdonascimento@gmail.com", # Corrigido para minúsculo
     "guedesafilho@gmail.com"
 ]
 
@@ -43,7 +46,7 @@ try:
     creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
     client = gspread.authorize(creds)
     
-    # ID DA PLANILHA OFICIAL (Substitua se necessário)
+    # ID DA PLANILHA OFICIAL
     PLANILHA_ID = "1cB0lfgN7LGCTB9aXGIsud-HPJ-hBevB1W1gtPeLJG_s"
     
     planilha = client.open_by_key(PLANILHA_ID)
@@ -57,7 +60,7 @@ except Exception as e:
 async def verify_google_token(authorization: str = Header(None)):
     """
     Verifica a identidade do usuário.
-    Aceita Tokens JWT Oficiais do Google e Tokens de Bypass (Offline).
+    Aceita Tokens JWT Oficiais do Google (App e Dashboard) e Tokens de Bypass (Offline).
     """
     if not authorization:
         raise HTTPException(status_code=401, detail="Token de segurança ausente")
@@ -74,7 +77,13 @@ async def verify_google_token(authorization: str = Header(None)):
         
     # Validação Real no Google
     try:
-        idinfo = id_token.verify_oauth2_token(token, requests.Request(), GOOGLE_CLIENT_ID)
+        # Pede para a biblioteca do Google verificar a assinatura do token
+        idinfo = id_token.verify_oauth2_token(token, requests.Request(), audience=None)
+        
+        # Verifica se o Token foi gerado pelo PWA App ou pelo Dashboard
+        if idinfo['aud'] not in GOOGLE_CLIENT_IDS:
+            raise ValueError("Token não pertence aos aplicativos autorizados.")
+            
         return idinfo['email']
     except ValueError:
         raise HTTPException(status_code=401, detail="Token do Google inválido ou expirado. Faça login novamente.")
@@ -106,9 +115,9 @@ async def get_dashboard_data(user_email: str = Depends(verify_google_token)):
 
 
 @app.post("/api/cadastros/sync")
-async def sync_cadastros(cadastros: list, user_email: str = Depends(verify_google_token)):
+async def sync_cadastros(cadastros: list = Body(...), user_email: str = Depends(verify_google_token)):
     """
-    Recebe os cadastros do aplicativo, trata e mapeia em 54 colunas (A a BB).
+    Recebe os cadastros do aplicativo em formato JSON, trata e mapeia em 54 colunas (A a BB).
     """
     if not aba_cadastros:
         raise HTTPException(status_code=500, detail="Google Sheets não configurado.")
